@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多模态AI Agent金融风险预测与归因系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔮 多模态AI Agent金融风险预测与归因系统</h1>
+            <p class="subtitle">数据拉取 → 特征工程 → 模型训练 → 风险预测 → LLM归因</p>
+        </header>
+
+  
+        <div class="input-panel">
+            <h2>请选择预测主体</h2>
+
+            <div class="form-group">
+                <label>主体类型</label>
+                <div class="radio-group">
+                    <label class="radio-item">
+                        <input type="radio" name="entity_type" value="market" checked onchange="updateInputPanel()">
+                        <span>整体市场</span>
+                    </label>
+                    <label class="radio-item">
+                        <input type="radio" name="entity_type" value="sector" onchange="updateInputPanel()">
+                        <span>行业</span>
+                    </label>
+                    <label class="radio-item">
+                        <input type="radio" name="entity_type" value="listed_company" onchange="updateInputPanel()">
+                        <span>上市公司</span>
+                    </label>
+                </div>
+            </div>
+
+        
+            <div class="form-group" id="company_input" style="display: none;">
+                <label>股票代码</label>
+                <input type="text" id="company_code" placeholder="例如：AAPL(苹果)、TSLA(特斯拉)、600519.SH(贵州茅台)">
+            </div>
+
+       
+            <div class="form-group" id="sector_select" style="display: none;">
+                <label>行业选择</label>
+                <select id="sector_code">
+                    {% for code, name in sector_list.items() %}
+                    <option value="{{ code }}">{{ name }} ({{ code }})</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label>预测时间范围</label>
+                <select id="time_horizon">
+                    <option value="短期">短期 (1年数据，1-7天预测)</option>
+                    <option value="中期">中期 (3年数据，1-3个月预测)</option>
+                    <option value="长期">长期 (5年数据，6-12个月预测)</option>
+                </select>
+            </div>
+
+ 
+            <div class="form-group">
+                <label class="checkbox-item">
+                    <input type="checkbox" id="pull_news" checked>
+                    <span>拉取相关新闻舆情数据（含情感分析+主题分析）</span>
+                </label>
+            </div>
+
+            <!-- 操作按钮组 -->
+            <div class="button-group">
+                <button id="pull_btn" class="primary-btn" onclick="startPullData()">
+                    1. 拉取数据并生成特征
+                </button>
+                <button id="train_btn" class="secondary-btn" onclick="startTrainModel()">
+                    2. 训练风险模型
+                </button>
+                <button id="predict_btn" class="success-btn" onclick="startPredictRisk()">
+                    3. 风险预测
+                </button>
+                <button id="attribution_btn" class="attribution-btn" onclick="startLLMAttribution()">
+                    4. LLM风险归因
+                </button>
+            </div>
+        </div>
+
+
+        <div id="loading" class="loading-panel" style="display: none;">
+            <div class="spinner"></div>
+            <p id="loading_text">正在从数据源拉取数据并生成特征，请稍候...</p>
+            <p class="tip">金融数据量较大，预计耗时5-20秒</p>
+        </div>
+
+
+        <div id="result_panel" class="result-panel" style="display: none;"></div>
+    </div>
+
+    <script>
+ 
+        function updateInputPanel() {
+            const entityType = document.querySelector('input[name="entity_type"]:checked').value;
+            const companyInput = document.getElementById('company_input');
+            const sectorSelect = document.getElementById('sector_select');
+
+            if (entityType === 'listed_company') {
+                companyInput.style.display = 'block';
+                sectorSelect.style.display = 'none';
+            } else if (entityType === 'sector') {
+                companyInput.style.display = 'none';
+                sectorSelect.style.display = 'block';
+            } else {
+                companyInput.style.display = 'none';
+                sectorSelect.style.display = 'none';
+            }
+        }
+
+   
+        function getUserParams() {
+            const entityType = document.querySelector('input[name="entity_type"]:checked').value;
+            let entityCode = '';
+            if (entityType === 'listed_company') {
+                entityCode = document.getElementById('company_code').value.trim();
+                if (!entityCode) {
+                    alert('请输入股票代码');
+                    return null;
+                }
+            } else if (entityType === 'sector') {
+                entityCode = document.getElementById('sector_code').value;
+            }
+            const timeHorizon = document.getElementById('time_horizon').value;
+            const pullNews = document.getElementById('pull_news').checked;
+
+            return {
+                entity_type: entityType,
+                entity_code: entityCode,
+                time_horizon: timeHorizon,
+                pull_news: pullNews
+            };
+        }
+
+  
+        async function startPullData() {
+            const params = getUserParams();
+            if (!params) return;
+
+            const btn = document.getElementById('pull_btn');
+            const loading = document.getElementById('loading');
+            const loadingText = document.getElementById('loading_text');
+            const resultPanel = document.getElementById('result_panel');
+
+            btn.disabled = true;
+            loading.style.display = 'block';
+            loadingText.textContent = '正在从数据源拉取数据并生成特征，请稍候...';
+            resultPanel.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/pull_data', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(params)
+                });
+
+                const result = await response.json();
+                renderPullResult(result);
+                resultPanel.style.display = 'block';
+            } catch (e) {
+                alert('请求失败：' + e.message);
+            } finally {
+                btn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+
+        async function startTrainModel() {
+            const params = getUserParams();
+            if (!params) return;
+
+            const btn = document.getElementById('train_btn');
+            const loading = document.getElementById('loading');
+            const loadingText = document.getElementById('loading_text');
+            const resultPanel = document.getElementById('result_panel');
+
+            btn.disabled = true;
+            loading.style.display = 'block';
+            loadingText.textContent = '正在训练风险模型，请稍候...';
+            resultPanel.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/train_model', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        entity_type: params.entity_type,
+                        entity_code: params.entity_code,
+                        time_horizon: params.time_horizon,
+                        model_name: 'risk_model'
+                    })
+                });
+
+                const result = await response.json();
+                renderTrainResult(result);
+                resultPanel.style.display = 'block';
+            } catch (e) {
+                alert('训练失败：' + e.message);
+            } finally {
+                btn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+        // 3. 风险预测
+        async function startPredictRisk() {
+            const params = getUserParams();
+            if (!params) return;
+
+            const btn = document.getElementById('predict_btn');
+            const loading = document.getElementById('loading');
+            const loadingText = document.getElementById('loading_text');
+            const resultPanel = document.getElementById('result_panel');
+
+            btn.disabled = true;
+            loading.style.display = 'block';
+            loadingText.textContent = '正在进行风险预测，请稍候...';
+            resultPanel.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/predict_risk', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        entity_type: params.entity_type,
+                        entity_code: params.entity_code,
+                        time_horizon: params.time_horizon,
+                        model_name: 'risk_model'
+                    })
+                });
+
+                const result = await response.json();
+                renderPredictResult(result);
+                resultPanel.style.display = 'block';
+            } catch (e) {
+                alert('预测失败：' + e.message);
+            } finally {
+                btn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+ 
+        async function startLLMAttribution() {
+            const btn = document.getElementById('attribution_btn');
+            const loading = document.getElementById('loading');
+            const loadingText = document.getElementById('loading_text');
+            const resultPanel = document.getElementById('result_panel');
+
+            btn.disabled = true;
+            loading.style.display = 'block';
+            loadingText.textContent = '正在调用Qwen3 Max进行风险归因，请稍候...';
+            resultPanel.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/generate_attribution', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const result = await response.json();
+                renderAttributionResult(result);
+                resultPanel.style.display = 'block';
+            } catch (e) {
+                alert('LLM归因失败：' + e.message);
+            } finally {
+                btn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+
+        function renderPullResult(data) {
+            const resultPanel = document.getElementById('result_panel');
+            if (!data.success) {
+                resultPanel.innerHTML = `
+                    <div class="error-card">
+                        <h3>❌ 处理失败</h3>
+                        <p>${data.error}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const rawData = data.raw_data;
+            const featureResult = data.feature_result;
+
+            resultPanel.innerHTML = `
+                <div class="success-card">
+                    <h3>✅ 数据拉取成功</h3>
+                    <div class="result-summary">
+                        <p><strong>主体类型：</strong>${rawData.entity_type === 'market' ? '整体市场' : rawData.entity_type === 'sector' ? '行业' : '上市公司'}</p>
+                        <p><strong>主体名称：</strong>${rawData.entity_name}</p>
+                        <p><strong>主体代码：</strong>${rawData.entity_code}</p>
+                        <p><strong>时间范围：</strong>${rawData.time_horizon}</p>
+                        <p><strong>数据条数：</strong>${rawData.data_count} 条</p>
+                    </div>
+                </div>
+
+                ${featureResult && featureResult.success ? `
+                    <div class="success-card" style="margin-top: 20px; border-left-color: #2563eb;">
+                        <h3>🔧 特征工程完成</h3>
+                        <div class="result-summary">
+                            <p><strong>生成特征数量：</strong>${featureResult.feature_count} 个</p>
+                            <p><strong>特征名称：</strong></p>
+                            <div class="feature-names">
+                                ${featureResult.feature_names.map(name => `<span class="feature-tag">${name}</span>`).join('')}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="data-section">
+                        <h4>🔧 特征集预览（前10条）</h4>
+                        <div class="data-preview">
+                            <pre>${JSON.stringify(featureResult.feature_preview, null, 2)}</pre>
+                        </div>
+                    </div>
+                ` : ''}
+
+                <div class="data-section">
+                    <h4>📈 原始价格数据预览（前5条）</h4>
+                    <div class="data-preview">
+                        <pre>${JSON.stringify(rawData.price_data ? rawData.price_data.slice(0,5) : rawData.market_core_data.slice(0,5), null, 2)}</pre>
+                    </div>
+                </div>
+            `;
+        }
+
+
+        function renderTrainResult(data) {
+            const resultPanel = document.getElementById('result_panel');
+            if (!data.success) {
+                resultPanel.innerHTML = `
+                    <div class="error-card">
+                        <h3>❌ 模型训练失败</h3>
+                        <p>${data.error}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const trainResult = data.train_result;
+            resultPanel.innerHTML = `
+                <div class="success-card" style="border-left-color: #10b981;">
+                    <h3>✅ 模型训练成功</h3>
+                    <div class="result-summary">
+                        <p><strong>训练集大小：</strong>${trainResult.train_size} 条</p>
+                        <p><strong>测试集大小：</strong>${trainResult.test_size} 条</p>
+                        <p><strong>ROC AUC：</strong>${trainResult.metrics.roc_auc}</p>
+                        <p><strong>PR AUC：</strong>${trainResult.metrics.pr_auc}</p>
+                    </div>
+                </div>
+
+                <div class="data-section">
+                    <h4>🏆 特征重要性 TOP 15</h4>
+                    <div class="data-preview">
+                        <pre>${JSON.stringify(trainResult.feature_importance, null, 2)}</pre>
+                    </div>
+                </div>
+
+                <div class="data-section">
+                    <h4>📊 分类报告</h4>
+                    <div class="data-preview">
+                        <pre>${JSON.stringify(trainResult.metrics.classification_report, null, 2)}</pre>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderPredictResult(data) {
+            const resultPanel = document.getElementById('result_panel');
+            if (!data.success) {
+                resultPanel.innerHTML = `
+                    <div class="error-card">
+                        <h3>❌ 风险预测失败</h3>
+                        <p>${data.error}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const predResult = data.prediction_result;
+            const riskLevelClass = predResult.latest_risk_level === '低' ? 'low' : 
+                                  predResult.latest_risk_level === '中' ? 'medium' : 
+                                  predResult.latest_risk_level === '高' ? 'high' : 'extreme';
+
+            resultPanel.innerHTML = `
+                <div class="success-card" style="border-left-color: #f59e0b;">
+                    <h3>🎯 风险预测完成</h3>
+                    <div class="result-summary">
+                        <p><strong>预测主体：</strong>${data.entity_name}</p>
+                        <p><strong>最新风险概率：</strong><span class="risk-prob">${predResult.latest_risk_probability}%</span></p>
+                        <p><strong>风险等级：</strong><span class="risk-level ${riskLevelClass}">${predResult.latest_risk_level}</span></p>
+                        <p><strong>风险预测：</strong>${predResult.latest_risk_prediction === 1 ? '⚠️ 存在风险' : '✅ 无风险'}</p>
+                    </div>
+                </div>
+
+                <div class="data-section">
+                    <h4>🔑 风险驱动特征 TOP 10</h4>
+                    <div class="data-preview">
+                        <pre>${JSON.stringify(predResult.feature_importance, null, 2)}</pre>
+                    </div>
+                </div>
+            `;
+        }
+
+  
+        function renderAttributionResult(data) {
+            const resultPanel = document.getElementById('result_panel');
+            if (!data.success) {
+                resultPanel.innerHTML = `
+                    <div class="error-card">
+                        <h3>❌ LLM归因失败</h3>
+                        <p>${data.error}</p>
+                        ${data.raw_response ? `<div class="data-section"><h4>原始响应</h4><div class="data-preview"><pre>${data.raw_response}</pre></div></div>` : ''}
+                    </div>
+                `;
+                return;
+            }
+
+            const attr = data.attribution;
+            resultPanel.innerHTML = `
+                <div class="attribution-header">
+                    <div class="success-card" style="border-left-color: #8b5cf6; margin-bottom: 0;">
+                        <h3>🧠 LLM风险归因完成</h3>
+                        <div class="result-summary">
+                            <p><strong>使用模型：</strong>${data.model_used}</p>
+                            <p><strong>Token消耗：</strong>${data.usage.total_tokens} (Prompt: ${data.usage.prompt_tokens}, Completion: ${data.usage.completion_tokens})</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="attribution-report">
+                    <!-- 执行摘要 -->
+                    <div class="report-section">
+                        <h4 class="section-title">📋 执行摘要</h4>
+                        <div class="report-content">
+                            <p>${attr.executive_summary}</p>
+                        </div>
+                    </div>
+
+                    <!-- 风险等级评估 -->
+                    <div class="report-section">
+                        <h4 class="section-title">⚠️ 风险等级评估</h4>
+                        <div class="report-content">
+                            <div class="risk-assessment-card">
+                                <div class="risk-level-display">
+                                    <span class="risk-level ${attr.risk_level_assessment.current_level === '低' ? 'low' : attr.risk_level_assessment.current_level === '中' ? 'medium' : attr.risk_level_assessment.current_level === '高' ? 'high' : 'extreme'}">
+                                        ${attr.risk_level_assessment.current_level}
+                                    </span>
+                                    <span class="risk-prob-display">${attr.risk_level_assessment.probability}%</span>
+                                </div>
+                                <p class="assessment-text">${attr.risk_level_assessment.assessment}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 关键风险驱动因素 -->
+                    <div class="report-section">
+                        <h4 class="section-title">🔑 关键风险驱动因素</h4>
+                        <div class="report-content">
+                            <div class="drivers-grid">
+                                ${attr.key_risk_drivers.map(driver => `
+                                    <div class="driver-card">
+                                        <div class="driver-header">
+                                            <span class="driver-name">${driver.factor}</span>
+                                            <span class="driver-impact ${driver.impact === '高' ? 'high' : driver.impact === '中' ? 'medium' : 'low'}">
+                                                ${driver.impact}影响
+                                            </span>
+                                        </div>
+                                        <p class="driver-explanation">${driver.explanation}</p>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 市场环境分析 -->
+                    <div class="report-section">
+                        <h4 class="section-title">🌐 市场环境分析</h4>
+                        <div class="report-content">
+                            <p>${attr.market_context}</p>
+                        </div>
+                    </div>
+
+                    <!-- 风险缓释建议 -->
+                    <div class="report-section">
+                        <h4 class="section-title">💡 风险缓释建议</h4>
+                        <div class="report-content">
+                            <ul class="suggestions-list">
+                                ${attr.mitigation_suggestions.map(s => `<li>${s}</li>`).join('')}
+                            </ul>
+                        </div>
+                    </div>
+
+                    <!-- 未来展望 -->
+                    <div class="report-section">
+                        <h4 class="section-title">🔮 未来展望</h4>
+                        <div class="report-content">
+                            <p>${attr.outlook}</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+    </script>
+</body>
+</html>
