@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial Risk Analysis</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header class="hero">
+            <p class="eyebrow">FinAgentLab</p>
+            <h1>Financial Risk Prediction and Attribution</h1>
+            <p class="subtitle">This open-source version uses user-provided commercial data credentials. Configure a provider first, then run the analysis workflow.</p>
+            <div class="hero-strip">
+                <div class="hero-chip">Commercial Data Ready</div>
+                <div class="hero-chip">Provider-Switched Backend</div>
+                <div class="hero-chip">Qwen Attribution</div>
+            </div>
+        </header>
+
+        <section class="panel">
+            <h2>Data Provider Configuration</h2>
+            <div class="grid">
+                <div class="field">
+                    <label for="provider_select">Provider</label>
+                    <select id="provider_select">
+                        <option value="">Select a provider</option>
+                        {% for key, item in provider_list.items() %}
+                        <option value="{{ key }}">{{ item.label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="field">
+                    <label for="provider_key">API Key</label>
+                    <input id="provider_key" type="password" placeholder="Enter your provider API key">
+                </div>
+            </div>
+
+            <div class="button-row">
+                <button class="btn primary" onclick="saveProviderConfig()">Save Data Source</button>
+            </div>
+
+            <div class="block">
+                <h4>Provider Notes</h4>
+                <p><strong>Twelve Data</strong> works well for unified market time series. <strong>EODHD</strong> is stronger for end-of-day data, fundamentals, and news.</p>
+                <p id="provider_status_text">Provider not configured.</p>
+            </div>
+        </section>
+
+        <section class="panel">
+            <h2>Analysis Parameters</h2>
+            <div class="grid">
+                <div class="field">
+                    <label>Entity Type</label>
+                    <div class="radio-group">
+                        <label><input type="radio" name="entity_type" value="market" checked onchange="updateInputPanel()"> Market</label>
+                        <label><input type="radio" name="entity_type" value="sector" onchange="updateInputPanel()"> Sector</label>
+                        <label><input type="radio" name="entity_type" value="listed_company" onchange="updateInputPanel()"> Stock</label>
+                    </div>
+                </div>
+
+                <div class="field" id="sector_wrap" style="display:none;">
+                    <label for="sector_code">Sector Code</label>
+                    <select id="sector_code">
+                        {% for code, name in sector_list.items() %}
+                        <option value="{{ code }}">{{ name }} ({{ code }})</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="field" id="company_wrap" style="display:none;">
+                    <label for="company_code">Ticker</label>
+                    <input id="company_code" type="text" placeholder="AAPL / MSFT / NVDA">
+                </div>
+
+                <div class="field">
+                    <label for="time_horizon">Horizon</label>
+                    <select id="time_horizon">
+                        <option value="short">Short: about 1 year history</option>
+                        <option value="medium">Medium: about 3 years history</option>
+                        <option value="long">Long: about 5 years history</option>
+                    </select>
+                </div>
+
+                <div class="field checkbox-line">
+                    <label><input type="checkbox" id="pull_news" checked> Include provider news if available</label>
+                </div>
+            </div>
+
+            <div class="button-row">
+                <button class="btn primary action-btn" onclick="startPullData()">1. Pull Data</button>
+                <button class="btn secondary action-btn" onclick="startTrainModel()">2. Train Model</button>
+                <button class="btn success action-btn" onclick="startPredictRisk()">3. Predict Risk</button>
+                <button class="btn accent action-btn" onclick="startLLMAttribution()">4. Generate Report</button>
+            </div>
+        </section>
+
+        <section id="loading" class="panel loading" style="display:none;">
+            <div class="spinner"></div>
+            <p id="loading_text">Working...</p>
+        </section>
+
+        <section id="result_panel" class="panel result" style="display:none;"></section>
+    </div>
+
+    <script>
+        let providerConfigured = false;
+
+        function updateInputPanel() {
+            const entityType = document.querySelector('input[name="entity_type"]:checked').value;
+            document.getElementById('sector_wrap').style.display = entityType === 'sector' ? 'block' : 'none';
+            document.getElementById('company_wrap').style.display = entityType === 'listed_company' ? 'block' : 'none';
+        }
+
+        function setLoading(visible, text='Working...') {
+            document.getElementById('loading').style.display = visible ? 'block' : 'none';
+            document.getElementById('loading_text').textContent = text;
+        }
+
+        function setActionButtonsState(enabled) {
+            providerConfigured = enabled;
+            document.querySelectorAll('.action-btn').forEach(btn => {
+                btn.disabled = !enabled;
+            });
+        }
+
+        function renderProviderStatus(status) {
+            const configured = status && status.configured;
+            if (status && status.provider) {
+                document.getElementById('provider_select').value = status.provider;
+            }
+            const text = configured
+                ? `Configured provider: ${status.provider_label || status.provider}`
+                : 'Provider not configured. Save a provider before using the workflow.';
+            document.getElementById('provider_status_text').textContent = text;
+            setActionButtonsState(Boolean(configured));
+        }
+
+        async function callApi(path, payload, method='POST') {
+            const options = { method, headers: { 'Content-Type': 'application/json' } };
+            if (method !== 'GET') {
+                options.body = JSON.stringify(payload || {});
+            }
+            const response = await fetch(path, options);
+            return response.json();
+        }
+
+        function showResult(html) {
+            const panel = document.getElementById('result_panel');
+            panel.innerHTML = html;
+            panel.style.display = 'block';
+        }
+
+        async function refreshProviderStatus() {
+            const data = await callApi('/api/config/data_source', null, 'GET');
+            if (data.success) {
+                renderProviderStatus(data.status);
+            }
+        }
+
+        async function saveProviderConfig() {
+            const provider = document.getElementById('provider_select').value;
+            const apiKey = document.getElementById('provider_key').value.trim();
+            setLoading(true, 'Saving data source configuration...');
+            try {
+                const data = await callApi('/api/config/data_source', { provider, api_key: apiKey });
+                renderProviderStatus(data.status);
+                if (data.success) {
+                    showResult(`<div class="success-card"><h3>Provider saved</h3><p>${data.provider_label} is now active.</p></div>`);
+                } else {
+                    showResult(`<div class="error-card"><h3>Configuration failed</h3><p>${data.error}</p></div>`);
+                }
+            } catch (error) {
+                showResult(`<div class="error-card"><h3>Configuration failed</h3><p>${error.message}</p></div>`);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function getUserParams() {
+            if (!providerConfigured) {
+                alert('Configure a data provider first.');
+                return null;
+            }
+
+            const entityType = document.querySelector('input[name="entity_type"]:checked').value;
+            let entityCode = '';
+            if (entityType === 'listed_company') {
+                entityCode = document.getElementById('company_code').value.trim().toUpperCase();
+                if (!entityCode) {
+                    alert('Please input a ticker');
+                    return null;
+                }
+            }
+            if (entityType === 'sector') {
+                entityCode = document.getElementById('sector_code').value;
+            }
+            return {
+                entity_type: entityType,
+                entity_code: entityCode,
+                time_horizon: document.getElementById('time_horizon').value,
+                pull_news: document.getElementById('pull_news').checked
+            };
+        }
+
+        async function startPullData() {
+            const params = getUserParams();
+            if (!params) return;
+            setLoading(true, 'Pulling provider data and building features...');
+            try {
+                const data = await callApi('/api/pull_data', params);
+                renderPullResult(data);
+            } catch (error) {
+                showResult(`<div class="error-card"><h3>Pull failed</h3><p>${error.message}</p></div>`);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        async function startTrainModel() {
+            const params = getUserParams();
+            if (!params) return;
+            setLoading(true, 'Training model...');
+            try {
+                const data = await callApi('/api/train_model', {
+                    entity_type: params.entity_type,
+                    entity_code: params.entity_code,
+                    time_horizon: params.time_horizon,
+                    model_name: 'risk_model'
+                });
+                renderTrainResult(data);
+            } catch (error) {
+                showResult(`<div class="error-card"><h3>Training failed</h3><p>${error.message}</p></div>`);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        async function startPredictRisk() {
+            const params = getUserParams();
+            if (!params) return;
+            setLoading(true, 'Running prediction...');
+            try {
+                const data = await callApi('/api/predict_risk', {
+                    entity_type: params.entity_type,
+                    entity_code: params.entity_code,
+                    time_horizon: params.time_horizon,
+                    model_name: 'risk_model'
+                });
+                renderPredictResult(data);
+            } catch (error) {
+                showResult(`<div class="error-card"><h3>Prediction failed</h3><p>${error.message}</p></div>`);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        async function startLLMAttribution() {
+            if (!providerConfigured) {
+                alert('Configure a data provider first.');
+                return;
+            }
+            setLoading(true, 'Generating attribution report...');
+            try {
+                const data = await callApi('/api/generate_attribution', {});
+                renderAttributionResult(data);
+            } catch (error) {
+                showResult(`<div class="error-card"><h3>Attribution failed</h3><p>${error.message}</p></div>`);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function renderPullResult(data) {
+            if (!data.success) {
+                showResult(`<div class="error-card"><h3>Pull failed</h3><p>${data.error}</p></div>`);
+                return;
+            }
+            const raw = data.raw_data;
+            const feat = data.feature_result;
+            showResult(`
+                <div class="success-card">
+                    <h3>Data and features ready</h3>
+                    <p>Entity: ${raw.entity_name} (${raw.entity_code})</p>
+                    <p>Source: ${raw.data_source || 'unknown'}</p>
+                    <p>Rows: ${raw.data_count}</p>
+                    <p>Features: ${feat.feature_count}</p>
+                </div>
+                <div class="block">
+                    <h4>Feature Names</h4>
+                    <div class="tag-list">${feat.feature_names.map(name => `<span class="tag">${name}</span>`).join('')}</div>
+                </div>
+                <div class="block">
+                    <h4>Feature Preview</h4>
+                    <pre>${JSON.stringify(feat.feature_preview, null, 2)}</pre>
+                </div>
+            `);
+        }
+
+        function renderTrainResult(data) {
+            if (!data.success) {
+                showResult(`<div class="error-card"><h3>Training failed</h3><p>${data.error}</p></div>`);
+                return;
+            }
+            const result = data.train_result;
+            showResult(`
+                <div class="success-card">
+                    <h3>Model trained</h3>
+                    <p>Train size: ${result.train_size}</p>
+                    <p>Test size: ${result.test_size}</p>
+                    <p>ROC AUC: ${result.metrics.roc_auc}</p>
+                    <p>PR AUC: ${result.metrics.pr_auc}</p>
+                </div>
+                <div class="block">
+                    <h4>Top Features</h4>
+                    <pre>${JSON.stringify(result.feature_importance, null, 2)}</pre>
+                </div>
+            `);
+        }
+
+        function renderPredictResult(data) {
+            if (!data.success) {
+                showResult(`<div class="error-card"><h3>Prediction failed</h3><p>${data.error}</p></div>`);
+                return;
+            }
+            const result = data.prediction_result;
+            showResult(`
+                <div class="success-card">
+                    <h3>Prediction complete</h3>
+                    <p>Entity: ${data.entity_name}</p>
+                    <p>Risk probability: <strong>${result.latest_risk_probability}%</strong></p>
+                    <p>Risk level: <strong>${result.latest_risk_level}</strong></p>
+                    <p>Risk triggered: ${result.latest_risk_prediction === 1 ? 'yes' : 'no'}</p>
+                </div>
+                <div class="block">
+                    <h4>Risk Drivers</h4>
+                    <pre>${JSON.stringify(result.feature_importance, null, 2)}</pre>
+                </div>
+            `);
+        }
+
+        function renderAttributionResult(data) {
+            if (!data.success) {
+                showResult(`<div class="error-card"><h3>Attribution failed</h3><p>${data.error}</p></div>`);
+                return;
+            }
+            const attr = data.attribution;
+            showResult(`
+                <div class="success-card">
+                    <h3>Report generated</h3>
+                    <p>Mode: ${data.model_used}</p>
+                </div>
+                <div class="block">
+                    <h4>Executive Summary</h4>
+                    <p>${attr.executive_summary}</p>
+                </div>
+                <div class="block">
+                    <h4>Risk Assessment</h4>
+                    <pre>${JSON.stringify(attr.risk_level_assessment, null, 2)}</pre>
+                </div>
+                <div class="block">
+                    <h4>Key Risk Drivers</h4>
+                    <pre>${JSON.stringify(attr.key_risk_drivers, null, 2)}</pre>
+                </div>
+                <div class="block">
+                    <h4>Mitigation Suggestions</h4>
+                    <pre>${JSON.stringify(attr.mitigation_suggestions, null, 2)}</pre>
+                </div>
+            `);
+        }
+
+        updateInputPanel();
+        refreshProviderStatus();
+    </script>
+</body>
+</html>
